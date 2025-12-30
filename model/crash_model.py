@@ -1,4 +1,3 @@
-import mindspore as ms
 import mindspore.nn as nn
 
 class CrashModel(nn.Cell):
