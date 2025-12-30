@@ -1,275 +1,483 @@
-import streamlit as st
 import io
+import json
+import datetime as dt
+from dataclasses import dataclass
+from typing import Dict, Any, Tuple, List
+
+import streamlit as st
+
+# PDF generation (ReportLab)
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
 
-from model.predict import predict_scenario
+
+# =========================
+# App Config + Modern UI
+# =========================
+st.set_page_config(
+    page_title="CrashLens AI",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+header {visibility: hidden;}
+
+.stApp {
+  background: radial-gradient(1200px 600px at 20% 0%, rgba(59,130,246,0.15), transparent 60%),
+              radial-gradient(900px 500px at 90% 10%, rgba(34,197,94,0.12), transparent 55%),
+              linear-gradient(180deg, #0b1220 0%, #070b14 100%);
+}
+
+section[data-testid="stSidebar"]{
+  background: rgba(255,255,255,0.04);
+  border-right: 1px solid rgba(255,255,255,0.08);
+}
+
+.card {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 18px;
+  padding: 18px 18px;
+  box-shadow: 0 12px 30px rgba(0,0,0,0.25);
+}
+
+.small {
+  opacity: 0.85;
+  font-size: 0.92rem;
+}
+
+.stButton>button {
+  border-radius: 14px;
+  padding: 0.55rem 1rem;
+  border: 1px solid rgba(255,255,255,0.18);
+}
+
+input, textarea {
+  border-radius: 12px !important;
+}
+
+.badge {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(59,130,246,0.18);
+  border: 1px solid rgba(59,130,246,0.35);
+  margin-right: 8px;
+  font-size: 0.85rem;
+}
+
+hr { border-color: rgba(255,255,255,0.08); }
+</style>
+""", unsafe_allow_html=True)
 
 
-def build_pdf(report_data, result):
+# =========================
+# Helpers
+# =========================
+DIRECTIONS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+def safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def normalize_probs(p: List[float]) -> List[float]:
+    s = sum(p)
+    if s <= 0:
+        return [1/3, 1/3, 1/3]
+    return [v/s for v in p]
+
+def make_report_payload(accident: Dict[str, Any], party1: Dict[str, Any], party2: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "accident": accident,
+        "party1": party1,
+        "party2": party2,
+        "analysis": analysis,
+        "generated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "app": "CrashLens AI"
+    }
+
+def build_pdf(report: Dict[str, Any]) -> bytes:
+    """
+    Simple PDF generator (English).
+    """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
 
-    y = height - 50
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, y, "CrashLens AI - Accident Report (Prototype)")
-    y -= 25
+    def draw_title(text, y):
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(2*cm, y, text)
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "1) Accident Details")
-    y -= 18
-    c.setFont("Helvetica", 11)
+    def draw_section(title, y):
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(2*cm, y, title)
+        c.setFont("Helvetica", 10)
+        return y - 0.6*cm
 
-    acc = report_data["accident"]
-    lines = [
-        f"Date: {acc['date']}",
-        f"Time: {acc['time']}",
-        f"Road Type: {acc['road_type']}",
-        f"Location: {acc['location']}",
-        f"Notes: {acc['notes']}",
-    ]
-    for line in lines:
-        c.drawString(60, y, line[:110])
-        y -= 14
+    def draw_kv(k, v, y):
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(2*cm, y, f"{k}:")
+        c.setFont("Helvetica", 10)
+        txt = str(v) if v is not None else ""
+        c.drawString(6.2*cm, y, txt[:110])
+        return y - 0.5*cm
 
-    y -= 10
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "2) Parties Information")
-    y -= 18
+    y = height - 2.2*cm
+    draw_title("CrashLens AI — Traffic Accident Report (Prototype)", y)
+    y -= 1.0*cm
 
-    # Party 1
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(55, y, "Party 1")
-    y -= 16
-    c.setFont("Helvetica", 11)
-    p1 = report_data["party1"]
-    p1_lines = [
-        f"Name: {p1['name']}",
-        f"ID: {p1['id']}",
-        f"Phone: {p1['phone']}",
-        f"Role: {p1['role']}",
-        f"Vehicle: {p1['vehicle']}",
-        f"Plate: {p1['plate']}",
-        f"Statement: {p1['statement']}",
-    ]
-    for line in p1_lines:
-        c.drawString(60, y, line[:110])
-        y -= 14
+    c.setFont("Helvetica", 10)
+    c.drawString(2*cm, y, "This report is auto-generated for demo/prototype purposes.")
+    y -= 0.8*cm
 
-    y -= 8
+    # Accident section
+    y = draw_section("1) Accident Details", y)
+    acc = report.get("accident", {})
+    for k in ["date", "time", "road_type", "intersection_type", "location", "notes"]:
+        y = draw_kv(k.replace("_", " ").title(), acc.get(k, ""), y)
 
-    # Party 2
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(55, y, "Party 2")
-    y -= 16
-    c.setFont("Helvetica", 11)
-    p2 = report_data["party2"]
-    p2_lines = [
-        f"Name: {p2['name']}",
-        f"ID: {p2['id']}",
-        f"Phone: {p2['phone']}",
-        f"Role: {p2['role']}",
-        f"Vehicle: {p2['vehicle']}",
-        f"Plate: {p2['plate']}",
-        f"Statement: {p2['statement']}",
-    ]
-    for line in p2_lines:
-        if y < 90:
-            c.showPage()
-            y = height - 50
-            c.setFont("Helvetica", 11)
-        c.drawString(60, y, line[:110])
-        y -= 14
+    y -= 0.3*cm
 
-    # Analysis section
-    if y < 170:
-        c.showPage()
-        y = height - 50
+    # Parties section
+    y = draw_section("2) Party 1", y)
+    p1 = report.get("party1", {})
+    for k in ["name", "id", "phone", "role", "vehicle", "plate", "insurance", "damage_notes", "statement"]:
+        y = draw_kv(k.replace("_", " ").title(), p1.get(k, ""), y)
 
-    y -= 10
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "3) Scenario Analysis (A / B / C)")
-    y -= 18
-    c.setFont("Helvetica", 11)
+    y -= 0.3*cm
 
-    inputs = report_data["analysis_inputs"]
-    c.drawString(60, y, f"Intersection: {inputs['intersection']} | Hour: {inputs['hour']}")
-    y -= 14
-    c.drawString(60, y, f"Vehicle 1: {inputs['v1_speed']} km/h | Direction: {inputs['v1_dir']}")
-    y -= 14
-    c.drawString(60, y, f"Vehicle 2: {inputs['v2_speed']} km/h | Direction: {inputs['v2_dir']}")
-    y -= 18
+    y = draw_section("3) Party 2", y)
+    p2 = report.get("party2", {})
+    for k in ["name", "id", "phone", "role", "vehicle", "plate", "insurance", "damage_notes", "statement"]:
+        y = draw_kv(k.replace("_", " ").title(), p2.get(k, ""), y)
 
-    c.drawString(60, y, f"Scenario A: {result['A']:.3f}")
-    y -= 14
-    c.drawString(60, y, f"Scenario B: {result['B']:.3f}")
-    y -= 14
-    c.drawString(60, y, f"Scenario C: {result['C']:.3f}")
-    y -= 18
+    y -= 0.3*cm
 
-    best = max(result, key=result.get)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(60, y, f"Most likely scenario: {best} ({result[best]:.3f})")
+    # Analysis
+    y = draw_section("4) Scenario Analysis", y)
+    an = report.get("analysis", {})
+    y = draw_kv("Intersection Type", an.get("intersection_type", ""), y)
+    y = draw_kv("Hour", an.get("hour", ""), y)
+    y = draw_kv("Vehicle 1 Speed (km/h)", an.get("v1_speed", ""), y)
+    y = draw_kv("Vehicle 1 Direction", an.get("v1_dir", ""), y)
+    y = draw_kv("Vehicle 2 Speed (km/h)", an.get("v2_speed", ""), y)
+    y = draw_kv("Vehicle 2 Direction", an.get("v2_dir", ""), y)
 
+    probs = an.get("probs", {"A": 0.33, "B": 0.33, "C": 0.34})
+    y -= 0.2*cm
+    y = draw_kv("Scenario A Probability", f"{probs.get('A', 0):.2f}", y)
+    y = draw_kv("Scenario B Probability", f"{probs.get('B', 0):.2f}", y)
+    y = draw_kv("Scenario C Probability", f"{probs.get('C', 0):.2f}", y)
+
+    best = an.get("best", "")
+    y = draw_kv("Most Likely Scenario", best, y)
+
+    # Footer
+    c.setFont("Helvetica-Oblique", 9)
+    c.drawString(2*cm, 1.5*cm, f"Generated at: {report.get('generated_at','')}")
     c.showPage()
     c.save()
+
     buffer.seek(0)
-    return buffer.getvalue()
+    return buffer.read()
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
-st.set_page_config(page_title="CrashLens AI", page_icon="🚗", layout="wide")
+# =========================
+# MindSpore (Optional) Predictor
+# =========================
+@st.cache_resource
+def get_predictor():
+    """
+    Tries to load a MindSpore predictor if available.
+    If not, returns None and we do a deterministic fallback scoring.
+    """
+    try:
+        # If you have your own predictor file, adjust import:
+        # from model.predict import predict_proba
+        from model.predict import predict_proba  # expected: (features)-> [pA,pB,pC]
+        return predict_proba
+    except Exception:
+        return None
 
-st.title("🚗 CrashLens AI")
-st.caption("Traffic Accident Reporting + Scenario Analysis (Prototype)")
+def fallback_proba(intersection_type: str, hour: int, v1_speed: int, v1_dir: str, v2_speed: int, v2_dir: str) -> List[float]:
+    """
+    Simple deterministic fallback (no ML) so the app always works.
+    """
+    # base weights
+    a, b, c = 0.33, 0.33, 0.34
+
+    # heuristics
+    speed_gap = abs(v1_speed - v2_speed)
+    high_speed = (v1_speed + v2_speed) / 2
+
+    # intersection influence
+    if intersection_type.lower() in ["roundabout", "circle", "rotary"]:
+        c += 0.10
+        a -= 0.03
+        b -= 0.07
+    elif intersection_type.lower() in ["crossroad", "intersection", "cross"]:
+        a += 0.08
+        b += 0.02
+        c -= 0.10
+
+    # speed influence
+    if high_speed >= 90:
+        b += 0.08
+        a -= 0.03
+        c -= 0.05
+    if speed_gap >= 40:
+        a += 0.06
+        c -= 0.04
+        b -= 0.02
+
+    # night vs day
+    if hour <= 5 or hour >= 22:
+        b += 0.04
+        c -= 0.02
+        a -= 0.02
+
+    return normalize_probs([a, b, c])
+
+
+# =========================
+# Header
+# =========================
+h1, h2 = st.columns([1, 6])
+with h1:
+    try:
+        st.image("assets/logo.png", width=110)
+    except Exception:
+        st.write("🚗")
+with h2:
+    st.markdown("## CrashLens AI")
+    st.caption("Traffic Accident Scenario Analysis (Prototype) • MindSpore-ready • PDF report")
+
+st.markdown(
+    '<span class="badge">English UI</span>'
+    '<span class="badge">Parties + Vehicles</span>'
+    '<span class="badge">Scenario A/B/C</span>'
+    '<span class="badge">PDF Export</span>',
+    unsafe_allow_html=True
+)
 st.divider()
 
-# -----------------------------
-# Sidebar: Analysis Parameters
-# -----------------------------
-with st.sidebar:
-    st.header("Analysis Parameters (A / B / C)")
 
-    intersection = st.selectbox("Intersection Type", ["Crossroad", "Roundabout"])
-    time_hour = st.slider("Time of Accident (Hour)", 0, 23, 14)
+# =========================
+# Sidebar: Analysis Inputs
+# =========================
+st.sidebar.markdown("### Input Parameters")
 
-    st.subheader("Vehicle 1 (for analysis)")
-    speed1 = st.slider("Speed V1 (km/h)", 0, 200, 60, key="speed1")
-    dir1 = st.selectbox("Direction V1", ["N", "E", "S", "W"], key="dir1")
+intersection_type = st.sidebar.selectbox(
+    "Intersection Type",
+    ["Crossroad", "Roundabout", "T-Junction", "Highway Merge", "Parking / Low Speed", "Other"],
+    index=0
+)
 
-    st.subheader("Vehicle 2 (for analysis)")
-    speed2 = st.slider("Speed V2 (km/h)", 0, 200, 50, key="speed2")
-    dir2 = st.selectbox("Direction V2", ["N", "E", "S", "W"], key="dir2")
+hour = st.sidebar.slider("Time of Accident (Hour)", 0, 23, 14)
 
+st.sidebar.markdown("### Vehicle 1 (for analysis)")
+v1_speed = st.sidebar.slider("Speed V1 (km/h)", 0, 180, 60)
+v1_dir = st.sidebar.selectbox("Direction V1", DIRECTIONS, index=0)
+
+st.sidebar.markdown("### Vehicle 2 (for analysis)")
+v2_speed = st.sidebar.slider("Speed V2 (km/h)", 0, 180, 50)
+v2_dir = st.sidebar.selectbox("Direction V2", DIRECTIONS, index=0)
+
+
+# =========================
+# Main: Data Entry
+# =========================
+left, right = st.columns([1.15, 1])
+
+with left:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 1) Accident Details")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        acc_date = st.date_input("Date", dt.date.today())
+    with c2:
+        acc_time = st.time_input("Time", dt.time(2, 15))
+
+    road_type = st.selectbox("Road Type", ["Crossroad", "Roundabout", "Highway", "Street", "Parking", "Other"], index=0)
+    location = st.text_input("Location (city/landmark)", placeholder="e.g., King Fahd Road / Signal 3")
+    notes = st.text_area("Notes (optional)", placeholder="Any extra context…", height=90)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 2) Party 1")
+    p1_name = st.text_input("Full Name (Party 1)", key="p1_name")
+    p1_id = st.text_input("ID / Iqama (Party 1)", key="p1_id")
+    p1_phone = st.text_input("Phone (Party 1)", key="p1_phone")
+    p1_role = st.selectbox("Role (Party 1)", ["Driver", "Owner", "Witness"], index=0, key="p1_role")
+    p1_vehicle = st.text_input("Vehicle (Party 1)", placeholder="e.g., Toyota Camry", key="p1_vehicle")
+    p1_plate = st.text_input("Plate Number (Party 1)", key="p1_plate")
+    p1_ins = st.text_input("Insurance (Party 1)", placeholder="Company / policy", key="p1_ins")
+    p1_damage = st.text_area("Damage Notes (Party 1)", placeholder="e.g., front bumper, right door…", height=70, key="p1_damage")
+    p1_statement = st.text_area("Statement (Party 1)", placeholder="What party 1 says happened…", height=110, key="p1_stmt")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+with right:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 3) Party 2")
+    p2_name = st.text_input("Full Name (Party 2)", key="p2_name")
+    p2_id = st.text_input("ID / Iqama (Party 2)", key="p2_id")
+    p2_phone = st.text_input("Phone (Party 2)", key="p2_phone")
+    p2_role = st.selectbox("Role (Party 2)", ["Driver", "Owner", "Witness"], index=0, key="p2_role")
+    p2_vehicle = st.text_input("Vehicle (Party 2)", placeholder="e.g., Hyundai Elantra", key="p2_vehicle")
+    p2_plate = st.text_input("Plate Number (Party 2)", key="p2_plate")
+    p2_ins = st.text_input("Insurance (Party 2)", placeholder="Company / policy", key="p2_ins")
+    p2_damage = st.text_area("Damage Notes (Party 2)", placeholder="e.g., rear bumper, left fender…", height=70, key="p2_damage")
+    p2_statement = st.text_area("Statement (Party 2)", placeholder="What party 2 says happened…", height=110, key="p2_stmt")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 4) Evidence (optional)")
+    imgs = st.file_uploader("Upload photos (optional)", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+    st.markdown('<p class="small">Tip: Keep it prototype-friendly. You can add mapping later.</p>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+st.divider()
+
+
+# =========================
+# Analyze
+# =========================
+btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+with btn_col1:
     analyze = st.button("Analyze A / B / C", use_container_width=True)
+with btn_col2:
+    make_pdf = st.button("Generate PDF", use_container_width=True)
+with btn_col3:
+    st.caption("If MindSpore predictor is not available, app uses a safe fallback so the demo always runs.")
 
-# -----------------------------
-# Main: Accident Report Form
-# -----------------------------
-st.subheader("1) Accident Details")
-
-colA, colB, colC = st.columns(3)
-with colA:
-    accident_date = st.date_input("Accident Date")
-with colB:
-    accident_time_text = st.text_input("Accident Time (HH:MM)", value="02:15")
-with colC:
-    road_type = st.selectbox("Road Type", ["Crossroad", "Roundabout", "Highway", "Street"])
-
-location = st.text_input("Accident Location (e.g., King Fahd Rd / Roundabout name)")
-notes = st.text_area("Short Description / Notes", height=90)
-
-st.divider()
-st.subheader("2) Parties Information")
-
-tab1, tab2 = st.tabs(["Party 1", "Party 2"])
-
-with tab1:
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        p1_name = st.text_input("Full Name", key="p1_name")
-        p1_id = st.text_input("National ID / Iqama", key="p1_id")
-    with c2:
-        p1_phone = st.text_input("Phone Number", key="p1_phone")
-        p1_role = st.selectbox("Role", ["Driver", "Owner", "Passenger"], key="p1_role")
-    with c3:
-        p1_vehicle = st.text_input("Vehicle Make/Model", placeholder="e.g., Toyota Camry", key="p1_vehicle")
-        p1_plate = st.text_input("Plate Number", key="p1_plate")
-
-    p1_statement = st.text_area("Party 1 Statement (What happened?)", height=90, key="p1_statement")
-
-with tab2:
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        p2_name = st.text_input("Full Name", key="p2_name")
-        p2_id = st.text_input("National ID / Iqama", key="p2_id")
-    with c2:
-        p2_phone = st.text_input("Phone Number", key="p2_phone")
-        p2_role = st.selectbox("Role", ["Driver", "Owner", "Passenger"], key="p2_role")
-    with c3:
-        p2_vehicle = st.text_input("Vehicle Make/Model", placeholder="e.g., Hyundai Elantra", key="p2_vehicle")
-        p2_plate = st.text_input("Plate Number", key="p2_plate")
-
-    p2_statement = st.text_area("Party 2 Statement (What happened?)", height=90, key="p2_statement")
-
-st.divider()
-
-# -----------------------------
-# Collect report data
-# -----------------------------
-report_data = {
-    "accident": {
-        "date": str(accident_date),
-        "time": accident_time_text,
-        "road_type": road_type,
-        "location": location,
-        "notes": notes,
-    },
-    "party1": {
-        "name": p1_name,
-        "id": p1_id,
-        "phone": p1_phone,
-        "role": p1_role,
-        "vehicle": p1_vehicle,
-        "plate": p1_plate,
-        "statement": p1_statement,
-    },
-    "party2": {
-        "name": p2_name,
-        "id": p2_id,
-        "phone": p2_phone,
-        "role": p2_role,
-        "vehicle": p2_vehicle,
-        "plate": p2_plate,
-        "statement": p2_statement,
-    },
-    "analysis_inputs": {
-        "intersection": intersection,
-        "hour": time_hour,
-        "v1_speed": speed1,
-        "v1_dir": dir1,
-        "v2_speed": speed2,
-        "v2_dir": dir2,
-    },
+# Build base dicts
+accident = {
+    "date": str(acc_date),
+    "time": acc_time.strftime("%H:%M"),
+    "road_type": road_type,
+    "intersection_type": intersection_type,
+    "location": location,
+    "notes": notes
 }
 
-# -----------------------------
-# Run analysis + Results + PDF
-# -----------------------------
-dir_map = {"N": 0, "E": 1, "S": 2, "W": 3}
-int_map = {"Crossroad": 0, "Roundabout": 1}
+party1 = {
+    "name": p1_name,
+    "id": p1_id,
+    "phone": p1_phone,
+    "role": p1_role,
+    "vehicle": p1_vehicle,
+    "plate": p1_plate,
+    "insurance": p1_ins,
+    "damage_notes": p1_damage,
+    "statement": p1_statement
+}
+
+party2 = {
+    "name": p2_name,
+    "id": p2_id,
+    "phone": p2_phone,
+    "role": p2_role,
+    "vehicle": p2_vehicle,
+    "plate": p2_plate,
+    "insurance": p2_ins,
+    "damage_notes": p2_damage,
+    "statement": p2_statement
+}
+
+analysis_payload = {
+    "intersection_type": intersection_type,
+    "hour": hour,
+    "v1_speed": v1_speed,
+    "v1_dir": v1_dir,
+    "v2_speed": v2_speed,
+    "v2_dir": v2_dir,
+    "probs": {"A": 0.33, "B": 0.33, "C": 0.34},
+    "best": "C"
+}
+
+if "last_report" not in st.session_state:
+    st.session_state["last_report"] = None
 
 if analyze:
-    inputs = [
-        float(speed1),
-        float(speed2),
-        float(dir_map[dir1]),
-        float(dir_map[dir2]),
-        float(time_hour),
-        float(int_map[intersection]),
-    ]
+    predictor = get_predictor()
 
-    result = predict_scenario(inputs)
+    # Features expected by ML predictor (you can modify depending on your model)
+    features = {
+        "intersection_type": intersection_type,
+        "hour": hour,
+        "v1_speed": v1_speed,
+        "v1_dir": v1_dir,
+        "v2_speed": v2_speed,
+        "v2_dir": v2_dir
+    }
+
+    if predictor is not None:
+        try:
+            probs_list = predictor(features)  # should return list [pA,pB,pC]
+            probs_list = normalize_probs([safe_float(probs_list[0]), safe_float(probs_list[1]), safe_float(probs_list[2])])
+        except Exception:
+            probs_list = fallback_proba(intersection_type, hour, v1_speed, v1_dir, v2_speed, v2_dir)
+    else:
+        probs_list = fallback_proba(intersection_type, hour, v1_speed, v1_dir, v2_speed, v2_dir)
+
+    probs = {"A": probs_list[0], "B": probs_list[1], "C": probs_list[2]}
+    best = max(probs, key=probs.get)
+
+    analysis_payload["probs"] = probs
+    analysis_payload["best"] = f"{best} ({probs[best]:.2f})"
 
     st.success("Analysis completed")
 
-    st.subheader("3) Scenario Probability Distribution")
-    st.bar_chart(result)
+    # Chart
+    st.markdown("### Scenario Probability Distribution")
+    st.bar_chart({"A": probs["A"], "B": probs["B"], "C": probs["C"]})
 
-    best = max(result, key=result.get)
-    st.info(f"Most likely scenario: {best} ({result[best]:.2f})")
+    st.info(f"Most likely scenario: **{best}**  (probability **{probs[best]:.2f}**)")
 
-    pdf_bytes = build_pdf(report_data, result)
-    st.download_button(
-        label="Download PDF Report",
-        data=pdf_bytes,
-        file_name="CrashLens_Report.pdf",
-        mime="application/pdf",
-        use_container_width=True
-    )
+    report = make_report_payload(accident, party1, party2, analysis_payload)
+    st.session_state["last_report"] = report
 
-else:
-    st.info("Fill the report fields, then click Analyze A / B / C from the sidebar.")
+    st.markdown("### Report Summary (Preview)")
+    st.json(report)
+
+# PDF generation from last report (or current if exists)
+if make_pdf:
+    report = st.session_state.get("last_report")
+    if report is None:
+        # generate minimal report even if they didn't click Analyze
+        report = make_report_payload(accident, party1, party2, analysis_payload)
+        st.session_state["last_report"] = report
+
+    try:
+        pdf_bytes = build_pdf(report)
+        st.success("PDF is ready")
+        st.download_button(
+            label="Download Report (PDF)",
+            data=pdf_bytes,
+            file_name="crashlens_report.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    except Exception as e:
+        st.error(f"PDF generation failed: {e}")
+
+st.divider()
+
+# Optional: show uploaded images preview (if any)
+if imgs:
+    st.markdown("### Evidence Preview")
+    cols = st.columns(3)
+    for i, f in enumerate(imgs):
+        with cols[i % 3]:
+            st.image(f, caption=f.name, use_container_width=True)
