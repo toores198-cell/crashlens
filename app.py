@@ -1,6 +1,126 @@
 import streamlit as st
+import io
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
 from model.predict import predict_scenario
 
+
+def build_pdf(report_data, result):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, y, "CrashLens AI - Accident Report (Prototype)")
+    y -= 25
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "1) Accident Details")
+    y -= 18
+    c.setFont("Helvetica", 11)
+
+    acc = report_data["accident"]
+    lines = [
+        f"Date: {acc['date']}",
+        f"Time: {acc['time']}",
+        f"Road Type: {acc['road_type']}",
+        f"Location: {acc['location']}",
+        f"Notes: {acc['notes']}",
+    ]
+    for line in lines:
+        c.drawString(60, y, line[:110])
+        y -= 14
+
+    y -= 10
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "2) Parties Information")
+    y -= 18
+
+    # Party 1
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(55, y, "Party 1")
+    y -= 16
+    c.setFont("Helvetica", 11)
+    p1 = report_data["party1"]
+    p1_lines = [
+        f"Name: {p1['name']}",
+        f"ID: {p1['id']}",
+        f"Phone: {p1['phone']}",
+        f"Role: {p1['role']}",
+        f"Vehicle: {p1['vehicle']}",
+        f"Plate: {p1['plate']}",
+        f"Statement: {p1['statement']}",
+    ]
+    for line in p1_lines:
+        c.drawString(60, y, line[:110])
+        y -= 14
+
+    y -= 8
+
+    # Party 2
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(55, y, "Party 2")
+    y -= 16
+    c.setFont("Helvetica", 11)
+    p2 = report_data["party2"]
+    p2_lines = [
+        f"Name: {p2['name']}",
+        f"ID: {p2['id']}",
+        f"Phone: {p2['phone']}",
+        f"Role: {p2['role']}",
+        f"Vehicle: {p2['vehicle']}",
+        f"Plate: {p2['plate']}",
+        f"Statement: {p2['statement']}",
+    ]
+    for line in p2_lines:
+        if y < 90:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 11)
+        c.drawString(60, y, line[:110])
+        y -= 14
+
+    # Analysis section
+    if y < 170:
+        c.showPage()
+        y = height - 50
+
+    y -= 10
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "3) Scenario Analysis (A / B / C)")
+    y -= 18
+    c.setFont("Helvetica", 11)
+
+    inputs = report_data["analysis_inputs"]
+    c.drawString(60, y, f"Intersection: {inputs['intersection']} | Hour: {inputs['hour']}")
+    y -= 14
+    c.drawString(60, y, f"Vehicle 1: {inputs['v1_speed']} km/h | Direction: {inputs['v1_dir']}")
+    y -= 14
+    c.drawString(60, y, f"Vehicle 2: {inputs['v2_speed']} km/h | Direction: {inputs['v2_dir']}")
+    y -= 18
+
+    c.drawString(60, y, f"Scenario A: {result['A']:.3f}")
+    y -= 14
+    c.drawString(60, y, f"Scenario B: {result['B']:.3f}")
+    y -= 14
+    c.drawString(60, y, f"Scenario C: {result['C']:.3f}")
+    y -= 18
+
+    best = max(result, key=result.get)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(60, y, f"Most likely scenario: {best} ({result[best]:.3f})")
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
 st.set_page_config(page_title="CrashLens AI", page_icon="🚗", layout="wide")
 
 st.title("🚗 CrashLens AI")
@@ -43,7 +163,6 @@ location = st.text_input("Accident Location (e.g., King Fahd Rd / Roundabout nam
 notes = st.text_area("Short Description / Notes", height=90)
 
 st.divider()
-
 st.subheader("2) Parties Information")
 
 tab1, tab2 = st.tabs(["Party 1", "Party 2"])
@@ -79,12 +198,8 @@ with tab2:
 st.divider()
 
 # -----------------------------
-# Run Analysis + Show Results
+# Collect report data
 # -----------------------------
-dir_map = {"N": 0, "E": 1, "S": 2, "W": 3}
-int_map = {"Crossroad": 0, "Roundabout": 1}
-
-# Keep everything in a report dict (later for PDF export)
 report_data = {
     "accident": {
         "date": str(accident_date),
@@ -121,6 +236,12 @@ report_data = {
     },
 }
 
+# -----------------------------
+# Run analysis + Results + PDF
+# -----------------------------
+dir_map = {"N": 0, "E": 1, "S": 2, "W": 3}
+int_map = {"Crossroad": 0, "Roundabout": 1}
+
 if analyze:
     inputs = [
         float(speed1),
@@ -135,14 +256,20 @@ if analyze:
 
     st.success("Analysis completed")
 
-    st.subheader("Scenario Probability Distribution")
+    st.subheader("3) Scenario Probability Distribution")
     st.bar_chart(result)
 
     best = max(result, key=result.get)
     st.info(f"Most likely scenario: {best} ({result[best]:.2f})")
 
-    st.subheader("Report Summary (Preview)")
-    st.json(report_data)
+    pdf_bytes = build_pdf(report_data, result)
+    st.download_button(
+        label="Download PDF Report",
+        data=pdf_bytes,
+        file_name="CrashLens_Report.pdf",
+        mime="application/pdf",
+        use_container_width=True
+    )
 
 else:
     st.info("Fill the report fields, then click Analyze A / B / C from the sidebar.")
